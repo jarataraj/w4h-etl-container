@@ -1,0 +1,15 @@
+name: w4h
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - xarray
+  - pvlib::pvlib
+  - netcdf4
+  - cartopy
+  - matplotlib
+  - bs4
+  - lxml
+  - google-cloud-storage
+  - pymongo
