@@ -60,12 +60,6 @@ def erbs_ufunc(ghi, zenith, doy):
     return (erbs_results["dni"], erbs_results["dhi"])
 
 
-# All mongodb operations must handle AutoReconnect
-@retry(AutoReconnect, tries=2, delay=0)
-def upload_forecasts(db, operation):
-    db.forecasts.bulk_write(operation, ordered=False)
-
-
 # ------ Status ------
 class Database:
     def __init__(self, db):
