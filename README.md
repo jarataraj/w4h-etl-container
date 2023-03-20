@@ -29,3 +29,4 @@ Python extract-transform-load data pipeline for creating forecasts of [Universal
 ## Other features:
 - Retries network requests with an exponential backoff
 - Will send a text message to a developer if the web scraper is unable to scrape through the NOMADS data directories as expected
+- Timer class (utils.py) allows for easy logging of wall and cpu time for sections of code
