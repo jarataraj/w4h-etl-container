@@ -24,54 +24,59 @@ CLOUD_MEDIA_STORAGE_BASE_URL = os.environ.get("CLOUD_MEDIA_STORAGE_BASE_URL")
 CLOUD_MEDIA_STORAGE_ACCESS_KEY = os.environ.get("CLOUD_MEDIA_STORAGE_ACCESS_KEY")
 LIMITS = json.loads(os.environ.get("LIMITS"))
 CLOUD_DATA_STORAGE_BUCKET_NAME = os.environ.get("CLOUD_DATA_STORAGE_BUCKET_NAME")
+DATA_SOURCE_URL = os.getenv("DATA_SOURCE_URL")
 
 
 def main():
-    print("ETL: checking for new data")
     db = Database(MongoClient(MONGODB_URL).w4h)
+    timer = Timer()
     if db.status["isUpdating"]:
         print("ETL: Update already in progress. Exiting")
         return
-    timer = Timer()
-    previous_data_source = db.status["latestSuccessfulUpdateSource"]
-    # ====== Web Scrape for link to latest available OPeNDAP data ======
-    # ------ find latest date ------
-    dates_directory = "https://nomads.ncep.noaa.gov/dods/gfs_0p25_1hr"
-    dates_source = requests.get(dates_directory, timeout=5000).text
-    dates_soup = BeautifulSoup(dates_source, "lxml").body
-    date_link_regex = r"^http:\/\/nomads\.ncep\.noaa\.gov(:80)?\/dods\/gfs_0p25_1hr\/gfs\d{4}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])$"
-    dates = dates_soup.find_all(href=re.compile(date_link_regex))
-    del dates_source
-    del dates_soup
-    if not dates:
-        return text_alert(f"ETL Error: zero dates found at {dates_directory}")
-    latest_date = max(dates, key=lambda link: int(link.attrs["href"][-8:]))
-    # ------ find latest time ------
-    times_directory = latest_date.attrs["href"]
-    times_source = requests.get(times_directory, timeout=5).text
-    times_soup = BeautifulSoup(times_source, "lxml").body
-    time_link_regex = r"^http:\/\/nomads\.ncep\.noaa\.gov(:80)?\/dods\/gfs_0p25_1hr\/gfs\d{4}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])\/gfs_0p25_1hr_(00|06|12|18)z\.info$"
-    times = times_soup.find_all(href=re.compile(time_link_regex))
-    if not times:
-        return text_alert(f"ETL ERROR: found zero times at {times_directory}")
-    latest_time = max(times, key=lambda link: int(link.attrs["href"][-8:-6]))
-    # ------ get latest data link ------
-    data_source = latest_time.attrs["href"][0:-5]
-    timer.log("Scraped for updated data")
+    if not DATA_SOURCE_URL:
+        print("ETL: checking for new data")
+        previous_data_source = db.status["latestSuccessfulUpdateSource"]
+        # ====== Web Scrape for link to latest available OPeNDAP data ======
+        # ------ find latest date ------
+        dates_directory = "https://nomads.ncep.noaa.gov/dods/gfs_0p25_1hr"
+        dates_source = requests.get(dates_directory, timeout=5000).text
+        dates_soup = BeautifulSoup(dates_source, "lxml").body
+        date_link_regex = r"^http:\/\/nomads\.ncep\.noaa\.gov(:80)?\/dods\/gfs_0p25_1hr\/gfs\d{4}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])$"
+        dates = dates_soup.find_all(href=re.compile(date_link_regex))
+        del dates_source
+        del dates_soup
+        if not dates:
+            return text_alert(f"ETL Error: zero dates found at {dates_directory}")
+        latest_date = max(dates, key=lambda link: int(link.attrs["href"][-8:]))
+        # ------ find latest time ------
+        times_directory = latest_date.attrs["href"]
+        times_source = requests.get(times_directory, timeout=5).text
+        times_soup = BeautifulSoup(times_source, "lxml").body
+        time_link_regex = r"^http:\/\/nomads\.ncep\.noaa\.gov(:80)?\/dods\/gfs_0p25_1hr\/gfs\d{4}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])\/gfs_0p25_1hr_(00|06|12|18)z\.info$"
+        times = times_soup.find_all(href=re.compile(time_link_regex))
+        if not times:
+            return text_alert(f"ETL ERROR: found zero times at {times_directory}")
+        latest_time = max(times, key=lambda link: int(link.attrs["href"][-8:-6]))
+        # ------ get latest data link ------
+        data_source = latest_time.attrs["href"][0:-5]
+        timer.log("Scraped for updated data")
 
-    if data_source == previous_data_source:
-        print(f"ETL: Already using latest data from {previous_data_source}")
-        return
-    if db.fetch_status()["isUpdating"]:
-        print("ETL: Update already in progress. Exiting")
-        return
+        if data_source == previous_data_source:
+            print(f"ETL: Already using latest data from {previous_data_source}")
+            return
+        if db.fetch_status()["isUpdating"]:
+            print("ETL: Update already in progress. Exiting")
+            return
+        print(
+            f"ETL: updating data from {previous_data_source} to data from {data_source}"
+        )
+    else:
+        data_source = DATA_SOURCE_URL
+        print(f"ETL: updating using {data_source}")
 
     # ====== ETL Forecasts ======
     try:
         db.set_status("isUpdating", True)
-        print(
-            f"ETL: updating data from {previous_data_source} to data from {data_source}"
-        )
 
         source = open_dataset(data_source)
 
@@ -240,7 +245,7 @@ def main():
         # merge old with new
         ds = ds.combine_first(
             xr.open_dataset("previous_w4h_data.nc").sel(
-                time=slice(earliest_necessary_data)
+                time=slice(earliest_necessary_data, None)
             )
         )
         # remove old data file to free memory
@@ -248,15 +253,27 @@ def main():
 
         # ====== Data Upload =====
         # ------ Encoding ------
-        ds["time_offset"] = ((ds.time - ds.time[0]) / 3600000000000).astype(np.int16)
-        # encode utci
+        # encode utci, max raw value 99.9 (encoded as 1999), min value -100.0 (encode as 0)
         ds["encoded_temp_times"] = ((ds.utci + 100) * 10).round().astype(np.int32)
         # encode wbgt
         ds["encoded_temp_times"] = ds.encoded_temp_times * 2000 + (
             (ds.wbgt + 100) * 10
         ).round().astype(np.int32)
-        # encode time
-        ds["encoded_temp_times"] = ds.encoded_temp_times * 120 + ds.time_offset
+        # encode time offset, max offset = 199 hrs (probs only need 120 + 50 but buffer just in case)
+        ds["time_offset"] = ds.time - ds.time[0]
+        # change timedelta64[ns] to integer number of hours.
+        #
+        # Note: must use accessors (dt.seconds, dt.days), otherwise strange
+        # results on Ubuntu systems (dividing by nanoseconds results in
+        # slightly off floats, conversion to integer appears to use
+        # truncate rather than round resulting in offsets of
+        # [0,0,2,3,3,5...]. See job w4h-etl-g8fzk)
+        ds["time_offset"] = (
+            (ds.time_offset.dt.seconds / 3600 + ds.time_offset.dt.days * 24)
+            .round()
+            .astype(int)
+        )
+        ds["encoded_temp_times"] = ds.encoded_temp_times * 200 + ds.time_offset
 
         # free memory
         ds = ds.drop_vars(["time_offset"])
@@ -309,7 +326,7 @@ def main():
         db.set_status("latestSuccessfulUpdateSource", data_source)
 
         # free memory
-        ds = ds.drop_vars(["encoded_temp_times", "wbgt"])
+        ds = ds.drop_vars(["encoded_temp_times"])
 
         # save data to cloud storage
         timer.reset()
@@ -317,6 +334,9 @@ def main():
         cloud_storage.upload_from_filename("new_w4h_data.nc", timeout=600)
         os.remove("new_w4h_data.nc")
         timer.log("Saved to cloud")
+
+        # free memory
+        ds = ds.drop_vars(["wbgt"])
 
         # ===== Charting =====
         # use non-gui backend for speed
@@ -361,7 +381,7 @@ def main():
         ]
         divisions = [-40, -27, -13, 0, 9, 26, 32, 38, 46]
 
-        projection = ccrs.Miller(central_longitude=0)
+        projection = ccrs.Miller(central_longitude=7.625)
         fig = plt.figure(figsize=(20, 20))
         ax = fig.add_subplot(1, 1, 1, projection=projection)
         ax.set_frame_on(False)
